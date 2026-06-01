@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block content %}
+<a href="/">← к списку</a>
+<h1>{{ chat.title }}</h1>
+<div class="mono">id: {{ chat.telegram_chat_id }} · тип: {{ chat.chat_type.value }}{% if chat.username %} · @{{ chat.username }}{% endif %} · {{ "включён" if chat.enabled else "отключён" }}</div>
+
+<form method="post" action="/chats/{{ chat.id }}" class="grid" style="margin-top:16px">
+  <label>Интервал, мин (пусто/0 — только по количеству)
+    <input name="interval" value="{{ chat.summary_interval_minutes or '' }}"></label>
+  <label>Порог важности (0–1)
+    <input name="threshold" value="{{ chat.importance_threshold }}"></label>
+  <label>Мин. сообщений<input name="min_messages" value="{{ chat.min_messages_before_digest }}"></label>
+  <label>Макс. сообщений<input name="max_messages" value="{{ chat.max_messages_before_digest }}"></label>
+  <label>Целевой чат, id (пусто — «Избранное»)
+    <input name="target" value="{{ chat.digest_target_chat_id or '' }}"></label>
+  <label class="check"><input type="checkbox" name="send_empty" value="true" {{ "checked" if chat.send_empty_digest }}> Слать пустые дайджесты</label>
+  <label class="full">Контекст чата (тематика, важные участники, что важно/игнорировать)
+    <textarea name="context_prompt" rows="4">{{ chat.chat_context_prompt or '' }}</textarea></label>
+  <label class="full">Доп. инструкции к дайджесту
+    <textarea name="summary_prompt" rows="3">{{ chat.chat_summary_prompt or '' }}</textarea></label>
+  <div class="full"><button type="submit">Сохранить</button></div>
+</form>
+
+<div class="row">
+  <form method="post" action="/chats/{{ chat.id }}/run"><button>Сделать дайджест сейчас</button></form>
+  <form method="post" action="/chats/{{ chat.id }}/run"><input type="hidden" name="dry" value="true"><button class="ghost">Сухой прогон</button></form>
+  <form method="post" action="/chats/{{ chat.id }}/delete" onsubmit="return confirm('Удалить чат и все данные?')"><button class="danger">Удалить</button></form>
+</div>
+
+{% if state %}
+<p class="mono">seen={{ state.last_seen_message_id }} · processed={{ state.last_processed_message_id }} ·
+  last_digest={{ state.last_digest_at.strftime("%d.%m %H:%M") if state.last_digest_at else "—" }}</p>
+{% endif %}
+
+<h2>Последние запуски</h2>
+{% if not runs %}<p class="badge">Запусков пока не было.</p>{% endif %}
+{% if runs %}
+<table>
+  <thead><tr><th>#</th><th>Триггер</th><th>Статус</th><th>Сообщений</th><th>Блоков</th><th>Важных</th><th>Когда</th></tr></thead>
+  <tbody>
+  {% for r in runs %}
+    <tr><td>{{ r.id }}</td><td>{{ r.trigger.value }}</td><td>{{ r.status.value }}</td>
+        <td>{{ r.raw_message_count }}</td><td>{{ r.preprocessed_block_count }}</td>
+        <td>{{ r.important_count }}</td><td>{{ r.created_at.strftime("%d.%m %H:%M") }}</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}

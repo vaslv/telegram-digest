@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Диалоги</h1>
+<p class="badge">Список наполняет daemon (кэш диалогов Telegram).</p>
+<form method="get" action="/dialogs" class="search">
+  <input name="q" value="{{ query }}" placeholder="поиск по названию">
+  <button>Искать</button>
+</form>
+
+{% if not dialogs %}<p>Кэш пуст — запустите daemon, он обновит список диалогов.</p>{% endif %}
+{% if dialogs %}
+<table>
+  <thead><tr><th>Название</th><th>Тип</th><th>id</th><th></th></tr></thead>
+  <tbody>
+  {% for d in dialogs %}
+    <tr>
+      <td>{{ d.title }}{% if d.username %} <span class="mono">@{{ d.username }}</span>{% endif %}</td>
+      <td>{{ d.chat_type.value }}</td>
+      <td class="mono">{{ d.telegram_chat_id }}</td>
+      <td>
+        {% if d.telegram_chat_id in watched %}<span class="badge">отслеживается</span>
+        {% else %}
+        <form method="post" action="/chats">
+          <input type="hidden" name="telegram_chat_id" value="{{ d.telegram_chat_id }}">
+          <button>+ Добавить</button>
+        </form>
+        {% endif %}
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+<h2>Добавить по id или @username</h2>
+<form method="post" action="/chats" class="search">
+  <input name="telegram_chat_id" placeholder="-100123… или @username">
+  <button>Добавить</button>
+</form>
+{% endblock %}

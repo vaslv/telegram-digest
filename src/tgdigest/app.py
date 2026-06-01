@@ -30,7 +30,14 @@ class Daemon:
         client = await self._manager.connect_authorized()
         service = self._c.digest_service(client=client)
         ingestor = MessageIngestor(client, self._c.db)
-        scheduler = DigestScheduler(self._c.db, service, ingestor=ingestor)
+        scheduler = DigestScheduler(
+            self._c.db,
+            service,
+            ingestor=ingestor,
+            client=client,
+            dialog_refresh_minutes=self._c.settings.web.dialog_refresh_minutes,
+            request_poll_seconds=self._c.settings.web.request_poll_seconds,
+        )
         ingestor.set_on_stored(scheduler.on_message_stored)
         ingestor.register_handlers()
         self._scheduler = scheduler

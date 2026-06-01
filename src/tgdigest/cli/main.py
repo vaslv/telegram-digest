@@ -1,8 +1,10 @@
 """Command-line interface (Typer).
 
-Each command runs in its own event loop and owns a :class:`Container` that it
-closes on exit. Commands that need Telegram open an authorized client via the
-``_client`` / ``_maybe_client`` context managers.
+Offline-first: only ``login``, ``run`` (daemon), ``watch-chat --resolve`` and
+``list-dialogs --live`` open a Telegram client. Everything else works purely on
+the database (the daemon owns the single Telethon session), so these commands no
+longer conflict with a running daemon. Chats are resolved by numeric id or
+@username from the watched-chats table; new chats use the daemon's dialog cache.
 """
 
 from __future__ import annotations
@@ -20,17 +22,20 @@ from sqlalchemy import text
 
 from tgdigest.app import run_daemon
 from tgdigest.container import Container
-from tgdigest.db.enums import PromptScope, RunTrigger
+from tgdigest.db.enums import ChatType, PromptScope, RunTrigger
 from tgdigest.db.models import Chat
 from tgdigest.db.repositories import (
     ChatRepository,
+    DialogRepository,
     DigestRepository,
+    DigestRequestRepository,
     MessageRepository,
     PromptRepository,
 )
 from tgdigest.summarization.prompts import seed_default_prompts
 from tgdigest.telegram.dialogs import list_dialogs as tg_list_dialogs
 from tgdigest.telegram.dialogs import resolve_chat
+from tgdigest.util import infer_chat_type
 
 app = typer.Typer(add_completion=False, no_args_is_help=True, help="TelegramDigest CLI")
 
@@ -59,24 +64,43 @@ def _is_numeric_ref(ref: str) -> bool:
     return ref.strip().lstrip("-").isdigit()
 
 
-async def _telegram_id(ref: str, client: object | None) -> int:
+async def _resolve_watched_chat(container: Container, ref: str) -> Chat:
+    """Find an already-watched chat by numeric id or @username (no Telegram)."""
     ref = ref.strip()
-    if _is_numeric_ref(ref):
-        return int(ref)
-    if client is None:
-        raise typer.BadParameter(f"для «{ref}» нужен доступ к Telegram (numeric id не задан)")
-    info = await resolve_chat(client, ref)
-    return info.telegram_chat_id
-
-
-async def _chat_by_ref(container: Container, ref: str, client: object | None) -> Chat:
-    telegram_id = await _telegram_id(ref, client)
     async with container.db.session() as session:
-        chat = await ChatRepository(session).get_by_telegram_id(telegram_id)
+        repo = ChatRepository(session)
+        chat = (
+            await repo.get_by_telegram_id(int(ref))
+            if _is_numeric_ref(ref)
+            else await repo.get_by_username(ref)
+        )
     if chat is None:
-        typer.secho(f"Чат {ref} не найден среди отслеживаемых. Сначала watch-chat.", fg="red")
+        typer.secho(f"Чат «{ref}» не найден среди отслеживаемых. Сначала watch-chat.", fg="red")
         raise typer.Exit(1)
     return chat
+
+
+async def _resolve_for_watch(
+    container: Container, ref: str
+) -> tuple[int, str, ChatType, str | None]:
+    """Resolve a chat to add, from the daemon's dialog cache (no Telegram)."""
+    ref = ref.strip()
+    async with container.db.session() as session:
+        repo = DialogRepository(session)
+        if _is_numeric_ref(ref):
+            telegram_id: int | None = int(ref)
+            dialog = await repo.get(int(ref))
+        else:
+            dialog = await repo.get_by_username(ref)
+            telegram_id = dialog.telegram_chat_id if dialog else None
+    if dialog is not None:
+        return dialog.telegram_chat_id, dialog.title, dialog.chat_type, dialog.username
+    if telegram_id is None:
+        raise typer.BadParameter(
+            f"«{ref}» не найден в кэше диалогов. Запустите daemon (он обновляет кэш) "
+            "или используйте --resolve при остановленном daemon."
+        )
+    return telegram_id, str(telegram_id), infer_chat_type(telegram_id), None
 
 
 def _parse_dt(value: str | None) -> datetime | None:
@@ -92,7 +116,6 @@ def _parse_dt(value: str | None) -> datetime | None:
 
 
 def _read_value(value: str | None) -> str | None:
-    """Return the value, or the contents of a file if it starts with ``@``."""
     if value is None:
         return None
     if value.startswith("@"):
@@ -128,7 +151,7 @@ def login(
 
 @app.command()
 def run() -> None:
-    """Запустить daemon: ингест сообщений + планировщик дайджестов."""
+    """Запустить daemon: ингест сообщений + планировщик + кэш диалогов + очередь."""
 
     async def _inner() -> None:
         container = Container()
@@ -143,29 +166,64 @@ def run() -> None:
     _run(_inner())
 
 
+@app.command()
+def web() -> None:
+    """Запустить веб-админку (FastAPI/uvicorn)."""
+    import uvicorn
+
+    container = Container()
+    settings = container.settings.web
+    uvicorn.run(
+        "tgdigest.web.app:create_app",
+        factory=True,
+        host=settings.host,
+        port=settings.port,
+        log_config=None,
+    )
+
+
 # ── chat discovery & configuration ──────────────────────────────────────────
 @app.command("list-dialogs")
 def list_dialogs(
     limit: int = typer.Option(50, "--limit", "-n"),
     chat_type: str | None = typer.Option(None, "--type", help="group|supergroup|channel|private"),
+    live: bool = typer.Option(
+        False, "--live", help="запросить напрямую (нужен остановленный daemon)"
+    ),
 ) -> None:
-    """Показать доступные диалоги Telegram."""
+    """Показать диалоги: из кэша daemon (по умолчанию) или напрямую (--live)."""
 
     async def _inner() -> None:
         container = Container()
+        rows: list[tuple[int, str, int | None, str, str | None]] = []
         try:
-            async with _client(container) as client:
-                dialogs = await tg_list_dialogs(client, limit=limit)
+            if live:
+                async with _client(container) as client:
+                    for d in await tg_list_dialogs(client, limit=limit):
+                        rows.append(
+                            (d.telegram_chat_id, d.chat_type.value, d.unread, d.title, d.username)
+                        )
+            else:
+                async with container.db.session() as session:
+                    cached = await DialogRepository(session).list(limit=limit)
+                if not cached:
+                    typer.secho(
+                        "Кэш диалогов пуст — запустите daemon (он обновляет кэш) "
+                        "или используйте --live при остановленном daemon.",
+                        fg="yellow",
+                    )
+                rows = [
+                    (d.telegram_chat_id, d.chat_type.value, None, d.title, d.username)
+                    for d in cached
+                ]
         finally:
             await container.aclose()
-        for dialog in dialogs:
-            if chat_type and dialog.chat_type.value != chat_type:
+        for telegram_id, ctype, unread, title, username in rows:
+            if chat_type and ctype != chat_type:
                 continue
-            handle = f" @{dialog.username}" if dialog.username else ""
-            typer.echo(
-                f"{dialog.telegram_chat_id:>15}  {dialog.chat_type.value:<10} "
-                f"unread={dialog.unread:<4} {dialog.title}{handle}"
-            )
+            handle = f" @{username}" if username else ""
+            unread_s = f"unread={unread}" if unread is not None else ""
+            typer.echo(f"{telegram_id:>15}  {ctype:<10} {unread_s:<11} {title}{handle}")
 
     _run(_inner())
 
@@ -206,23 +264,32 @@ def watch_chat(
     max_messages: int | None = typer.Option(None, "--max"),
     threshold: float | None = typer.Option(None, "--threshold"),
     target: int | None = typer.Option(None, "--target", help="куда слать дайджест (chat_id)"),
+    resolve: bool = typer.Option(
+        False, "--resolve", help="резолвить через Telegram (нужен остановленный daemon)"
+    ),
 ) -> None:
-    """Добавить чат в мониторинг (или обновить его настройки)."""
+    """Добавить чат в мониторинг (по умолчанию из кэша диалогов, без Telegram)."""
 
     async def _inner() -> None:
         container = Container()
         defaults = container.settings.defaults
         try:
-            async with _client(container) as client:
-                resolved = ref if not _is_numeric_ref(ref) else int(ref)
-                info = await resolve_chat(client, resolved)
+            if resolve:
+                async with _client(container) as client:
+                    lookup = ref if not _is_numeric_ref(ref) else int(ref)
+                    info = await resolve_chat(client, lookup)
+                telegram_id, title, ctype, username = (
+                    info.telegram_chat_id, info.title, info.chat_type, info.username
+                )
+            else:
+                telegram_id, title, ctype, username = await _resolve_for_watch(container, ref)
             resolved_interval = defaults.interval_minutes if interval is None else interval
             async with container.db.session() as session:
                 chat = await ChatRepository(session).create_or_update(
-                    telegram_chat_id=info.telegram_chat_id,
-                    title=info.title,
-                    chat_type=info.chat_type,
-                    username=info.username,
+                    telegram_chat_id=telegram_id,
+                    title=title,
+                    chat_type=ctype,
+                    username=username,
                     enabled=True,
                     summary_interval_minutes=resolved_interval or None,
                     min_messages_before_digest=min_messages or defaults.min_msgs,
@@ -230,9 +297,8 @@ def watch_chat(
                     importance_threshold=threshold or defaults.importance_threshold,
                     digest_target_chat_id=target,
                 )
-            typer.secho(
-                f"Отслеживаю «{chat.title}» ({chat.telegram_chat_id}).", fg="green"
-            )
+            note = "" if title != str(telegram_id) else " (название подтянет daemon)"
+            typer.secho(f"Отслеживаю «{chat.title}» ({telegram_id}).{note}", fg="green")
         finally:
             await container.aclose()
 
@@ -249,8 +315,7 @@ def unwatch_chat(
     async def _inner() -> None:
         container = Container()
         try:
-            async with _maybe_client(container, needed=not _is_numeric_ref(ref)) as client:
-                chat = await _chat_by_ref(container, ref, client)
+            chat = await _resolve_watched_chat(container, ref)
             async with container.db.session() as session:
                 repo = ChatRepository(session)
                 if purge:
@@ -272,8 +337,7 @@ def show_chat_config(ref: str = typer.Argument(...)) -> None:
     async def _inner() -> None:
         container = Container()
         try:
-            async with _maybe_client(container, needed=not _is_numeric_ref(ref)) as client:
-                chat = await _chat_by_ref(container, ref, client)
+            chat = await _resolve_watched_chat(container, ref)
             async with container.db.session() as session:
                 repo = ChatRepository(session)
                 state = await repo.get_state(chat.id)
@@ -317,7 +381,9 @@ def show_chat_config(ref: str = typer.Argument(...)) -> None:
 @app.command("set-chat-prompt")
 def set_chat_prompt(
     ref: str = typer.Argument(...),
-    context: str | None = typer.Option(None, "--context", help="текст или @файл — контекст чата"),
+    context: str | None = typer.Option(
+        None, "--context", help="текст или @файл — контекст чата"
+    ),
     summary: str | None = typer.Option(
         None, "--summary", help="текст или @файл — инструкции дайджеста"
     ),
@@ -329,8 +395,7 @@ def set_chat_prompt(
     async def _inner() -> None:
         container = Container()
         try:
-            async with _maybe_client(container, needed=not _is_numeric_ref(ref)) as client:
-                chat = await _chat_by_ref(container, ref, client)
+            chat = await _resolve_watched_chat(container, ref)
             async with container.db.session() as session:
                 await ChatRepository(session).set_prompts(
                     chat.id, context=_read_value(context), summary=_read_value(summary)
@@ -394,35 +459,48 @@ def seed_prompts() -> None:
 @app.command("run-digest")
 def run_digest(
     ref: str = typer.Argument(...),
-    since: str | None = typer.Option(None, "--since", help="ISO-дата начала окна"),
-    until: str | None = typer.Option(None, "--until", help="ISO-дата конца окна"),
-    dry_run: bool = typer.Option(False, "--dry-run", help="не отправлять, только показать"),
+    since: str | None = typer.Option(
+        None, "--since", help="ISO-дата начала окна (только с --dry-run)"
+    ),
+    until: str | None = typer.Option(
+        None, "--until", help="ISO-дата конца окна (только с --dry-run)"
+    ),
+    dry_run: bool = typer.Option(False, "--dry-run", help="не отправлять, показать результат"),
 ) -> None:
-    """Сформировать дайджест для чата немедленно."""
+    """Сформировать дайджест: --dry-run локально (без отправки) или в очередь daemon."""
 
     async def _inner() -> None:
         container = Container()
-        needs_client = (not dry_run) or (not _is_numeric_ref(ref))
         try:
-            async with _maybe_client(container, needed=needs_client) as client:
-                chat = await _chat_by_ref(container, ref, client)
-                service = container.digest_service(client=client)
+            chat = await _resolve_watched_chat(container, ref)
+            if dry_run:
+                service = container.digest_service(client=None)
                 outcome = await service.run(
                     chat.id,
                     trigger=RunTrigger.manual,
                     since=_parse_dt(since),
                     until=_parse_dt(until),
-                    dry_run=dry_run,
-                    send=not dry_run,
+                    dry_run=True,
+                    send=False,
                 )
-            color = {"success": "green", "empty": "yellow"}.get(outcome.status, "red")
-            typer.secho(
-                f"[{outcome.status}] {outcome.message} "
-                f"(важных: {outcome.important_count}, отправлено: {outcome.sent})",
-                fg=color,
-            )
-            if dry_run and outcome.body_markdown:
-                typer.echo("\n" + outcome.body_markdown)
+                color = {"success": "green", "empty": "yellow"}.get(outcome.status, "red")
+                typer.secho(
+                    f"[{outcome.status}] {outcome.message} (важных: {outcome.important_count})",
+                    fg=color,
+                )
+                if outcome.body_markdown:
+                    typer.echo("\n" + outcome.body_markdown)
+            else:
+                if since or until:
+                    raise typer.BadParameter(
+                        "--since/--until поддерживаются только с --dry-run (или reprocess-messages)"
+                    )
+                async with container.db.session() as session:
+                    request = await DigestRequestRepository(session).enqueue(chat.id, dry_run=False)
+                typer.secho(
+                    f"Запрос #{request.id} в очереди — daemon сформирует и отправит дайджест.",
+                    fg="green",
+                )
         finally:
             await container.aclose()
 
@@ -436,14 +514,13 @@ def reprocess_messages(
     until: str = typer.Option(..., "--until", help="ISO-дата конца окна"),
     no_send: bool = typer.Option(False, "--no-send", help="не отправлять результат"),
 ) -> None:
-    """Повторно проанализировать сообщения за период (например, после смены промптов)."""
+    """Повторно проанализировать сообщения за период (отправка требует остановки daemon)."""
 
     async def _inner() -> None:
         container = Container()
         try:
-            needs_client = not no_send or not _is_numeric_ref(ref)
-            async with _maybe_client(container, needed=needs_client) as client:
-                chat = await _chat_by_ref(container, ref, client)
+            chat = await _resolve_watched_chat(container, ref)
+            async with _maybe_client(container, needed=not no_send) as client:
                 service = container.digest_service(client=client)
                 outcome = await service.run(
                     chat.id,
@@ -479,7 +556,7 @@ def healthcheck() -> None:
             )
             typer.echo(f"session: {'present' if has_session else 'missing'}")
             ok = has_session
-        except Exception as exc:
+        except Exception as exc:  # report any failure as unhealthy
             typer.secho(f"db: error: {exc}", fg="red")
             ok = False
         finally:

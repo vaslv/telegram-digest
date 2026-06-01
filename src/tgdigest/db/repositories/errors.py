@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from sqlalchemy import select
+
 from tgdigest.db.enums import ErrorStage
 from tgdigest.db.models import ProcessingError
 from tgdigest.db.repositories.base import BaseRepository
@@ -33,3 +35,7 @@ class ErrorRepository(BaseRepository):
         self.session.add(error)
         await self.session.flush()
         return error
+
+    async def recent(self, limit: int = 50) -> list[ProcessingError]:
+        stmt = select(ProcessingError).order_by(ProcessingError.id.desc()).limit(limit)
+        return list((await self.session.execute(stmt)).scalars().all())

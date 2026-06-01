@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Дайджесты</h1>
+{% if not digests %}<p>Дайджестов пока нет.</p>{% endif %}
+{% if digests %}
+<table>
+  <thead><tr><th>#</th><th>Чат</th><th>Период</th><th>Пусто</th><th>Отправлен</th><th>Когда</th></tr></thead>
+  <tbody>
+  {% for d in digests %}
+    <tr>
+      <td><a href="/digests/{{ d.id }}">{{ d.id }}</a></td>
+      <td>{{ d.title }}</td>
+      <td class="mono">{% if d.period_start %}{{ d.period_start.strftime("%d.%m %H:%M") }}–{{ d.period_end.strftime("%H:%M") }}{% else %}—{% endif %}</td>
+      <td>{{ "да" if d.is_empty else "нет" }}</td>
+      <td>{{ "да" if d.sent else "нет" }}</td>
+      <td>{{ d.created_at.strftime("%d.%m %H:%M") }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}

@@ -139,6 +139,17 @@ class DefaultsSettings(BaseSettings):
     send_empty: bool = False
 
 
+class WebSettings(BaseSettings):
+    model_config = _config("WEB_")
+
+    password: str = ""
+    secret_key: str = "change-me"
+    host: str = "0.0.0.0"
+    port: int = 8080
+    dialog_refresh_minutes: int = 10
+    request_poll_seconds: int = 8
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=_ENV_FILE, extra="ignore")
 
@@ -148,6 +159,7 @@ class Settings(BaseSettings):
     llm: LLMSettings = Field(default_factory=LLMSettings)
     preprocess: PreprocessSettings = Field(default_factory=PreprocessSettings)
     defaults: DefaultsSettings = Field(default_factory=DefaultsSettings)
+    web: WebSettings = Field(default_factory=WebSettings)
 
 
 @lru_cache

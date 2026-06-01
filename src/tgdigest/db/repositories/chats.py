@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, select, update
 
 from tgdigest.db.enums import ChatType
 from tgdigest.db.models import Chat, ChatState
@@ -28,6 +28,10 @@ class ChatRepository(BaseRepository):
 
     async def get_by_telegram_id(self, telegram_chat_id: int) -> Chat | None:
         stmt = select(Chat).where(Chat.telegram_chat_id == telegram_chat_id)
+        return (await self.session.execute(stmt)).scalar_one_or_none()
+
+    async def get_by_username(self, username: str) -> Chat | None:
+        stmt = select(Chat).where(func.lower(Chat.username) == username.lstrip("@").lower())
         return (await self.session.execute(stmt)).scalar_one_or_none()
 
     async def list_all(self) -> list[Chat]:
@@ -74,6 +78,15 @@ class ChatRepository(BaseRepository):
         if not clean:
             return
         await self.session.execute(update(Chat).where(Chat.id == chat_id).values(**clean))
+
+    async def set_identity(
+        self, chat_id: int, *, title: str, chat_type: ChatType, username: str | None
+    ) -> None:
+        await self.session.execute(
+            update(Chat)
+            .where(Chat.id == chat_id)
+            .values(title=title, chat_type=chat_type, username=username)
+        )
 
     async def set_enabled(self, chat_id: int, enabled: bool) -> None:
         await self.session.execute(

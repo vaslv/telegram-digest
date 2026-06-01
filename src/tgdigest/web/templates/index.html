@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="status">
+  <div>Диалоги обновлены: {{ last_refresh.strftime("%d.%m %H:%M") if last_refresh else "—" }}</div>
+  <div>В очереди: {{ pending }}</div>
+  <a class="btn" href="/dialogs"><button>+ Добавить чат</button></a>
+</section>
+
+<h1>Чаты под мониторингом</h1>
+{% if not chats %}<p>Пока нет чатов. <a href="/dialogs">Добавить из списка диалогов</a>.</p>{% endif %}
+{% if chats %}
+<table>
+  <thead><tr><th></th><th>Чат</th><th>id</th><th>Интервал</th><th>min/max</th><th>Порог</th><th>Действия</th></tr></thead>
+  <tbody>
+  {% for chat in chats %}
+    <tr>
+      <td>{{ "🟢" if chat.enabled else "⚪" }}</td>
+      <td><a href="/chats/{{ chat.id }}">{{ chat.title }}</a></td>
+      <td class="mono">{{ chat.telegram_chat_id }}</td>
+      <td>{{ chat.summary_interval_minutes or "—" }}{% if chat.summary_interval_minutes %}м{% endif %}</td>
+      <td>{{ chat.min_messages_before_digest }}/{{ chat.max_messages_before_digest }}</td>
+      <td>{{ chat.importance_threshold }}</td>
+      <td class="actions">
+        <form method="post" action="/chats/{{ chat.id }}/run"><button>Дайджест</button></form>
+        <form method="post" action="/chats/{{ chat.id }}/run"><input type="hidden" name="dry" value="true"><button class="ghost">Сухой</button></form>
+        <form method="post" action="/chats/{{ chat.id }}/toggle"><button class="ghost">{{ "Выкл" if chat.enabled else "Вкл" }}</button></form>
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+<h2>Последние запуски</h2>
+{% if not runs %}<p class="badge">Запусков пока не было.</p>{% endif %}
+{% if runs %}
+<table>
+  <thead><tr><th>#</th><th>Чат</th><th>Триггер</th><th>Статус</th><th>Важных</th><th>Когда</th></tr></thead>
+  <tbody>
+  {% for r in runs %}
+    <tr><td>{{ r.id }}</td><td class="mono">{{ r.chat_id }}</td><td>{{ r.trigger.value }}</td>
+        <td>{{ r.status.value }}</td><td>{{ r.important_count }}</td>
+        <td>{{ r.created_at.strftime("%d.%m %H:%M") }}</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}

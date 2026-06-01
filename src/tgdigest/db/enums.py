@@ -72,6 +72,13 @@ class PromptScope(enum.StrEnum):
     stage2_instructions = "stage2_instructions"
 
 
+class RequestStatus(enum.StrEnum):
+    pending = "pending"
+    running = "running"
+    done = "done"
+    failed = "failed"
+
+
 class ErrorStage(enum.StrEnum):
     ingest = "ingest"
     catchup = "catchup"

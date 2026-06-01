@@ -44,8 +44,9 @@ TelegramDigest — асинхронный self-hosted сервис на Python 3
 | Telegram | `telegram/{client,dialogs,mapper,ingest,sender,flood}.py` | auth/сессия, диалоги, ингест, маппинг, отправка, FloodWait |
 | LLM | `llm/{base,errors,retry,tokens,json_utils,ollama,openai_compatible,claude,factory}.py` | абстракция провайдера, ретраи, токены/чанкинг, JSON |
 | Summarization | `summarization/{preprocess,prompts,schemas,stage1_importance,stage2_digest,render,jsonio,service}.py` | предобработка, промпты, два этапа, рендер, оркестрация |
-| Scheduling | `scheduling/{scheduler,triggers}.py` | APScheduler, триггеры по времени/количеству, reconcile, локи |
-| CLI / App | `cli/main.py`, `app.py`, `container.py` | команды, daemon, composition root |
+| Scheduling | `scheduling/{scheduler,triggers}.py` | APScheduler, триггеры, reconcile, локи, dialog-refresh, request-poller |
+| CLI / App | `cli/main.py`, `app.py`, `container.py` | команды (offline-first), daemon, composition root |
+| Web | `web/{app,auth,routes}.py`, `web/templates/*` | FastAPI + HTMX/Jinja админка (только БД) |
 
 **DI:** `Container` (`container.py`) — явная конструкторная инъекция: владеет
 движком БД и LLM-провайдером как синглтонами, создаёт сервисы по требованию. Без
@@ -70,10 +71,14 @@ DI-фреймворка. Async-сессия открывается per-unit-of-w
 - **prompts** — версии глобальных промптов; частичный уникальный индекс «одна
   активная версия на scope».
 - **processing_errors** — журнал ошибок по стадиям.
+- **dialogs** — кэш доступных диалогов Telegram (наполняет daemon): id, title,
+  type, username, refreshed_at. Источник для пикера чатов в вебе/CLI.
+- **digest_requests** — очередь ручных запусков (пишет веб/CLI, исполняет daemon):
+  chat_id, dry_run, status (pending/running/done/failed), digest_run_id.
 
 Все enum хранятся как нативные типы PostgreSQL (значения в нижнем регистре).
-Начальная миграция (`migrations/versions/0001_initial.py`) строит схему напрямую
-из метаданных ORM (`Base.metadata.create_all`) — она всегда соответствует моделям;
+Начальные миграции (`0001_initial`, `0002_web_admin`) строят схему из метаданных
+ORM (`Base.metadata.create_all`, idempotent) — она всегда соответствует моделям;
 требует online-режим (живое подключение), как и делает entrypoint.
 
 ## Потоки обработки
@@ -127,6 +132,29 @@ PostgreSQL advisory-lock (`pg_try_advisory_lock`). `--dry-run` не двигае
 ### Восстановление после рестарта
 Durable-состояние в PostgreSQL, сессия Telethon — в volume. На старте: catch-up +
 пересборка планировщика. Идемпотентность — через `ON CONFLICT` и состояние чата.
+
+## Веб-админка и делегирование Telegram-операций
+
+Принцип: **daemon — единственный владелец Telethon-сессии** (SQLite в volume не
+терпит двух клиентов). Веб (`web/`) и CLI работают только с PostgreSQL и не
+открывают второй клиент. Telegram-операции делегируются через две таблицы:
+
+- **Кэш диалогов:** daemon раз в `WEB_DIALOG_REFRESH_MINUTES` вызывает
+  `iter_dialogs()` и пишет `dialogs` (попутно прогревая кэш сущностей Telethon —
+  после этого `get_input_entity(marked_id)` резолвит любой чат). Веб/CLI читают
+  `dialogs` для пикера и для названий при добавлении.
+- **Очередь запусков:** «Сделать дайджест» в вебе/`run-digest` в CLI кладут запись
+  в `digest_requests`; daemon раз в `WEB_REQUEST_POLL_SECONDS` забирает pending
+  (`SELECT … FOR UPDATE SKIP LOCKED`) и исполняет через `DigestService`.
+
+Добавление чата по «сырому» id создаёт запись с заглушкой названия; daemon на
+ближайшем reconcile подтягивает title/type/username из кэша диалогов (бэкофилл).
+
+Веб — FastAPI + Jinja2 + HTMX (`web/app.py` фабрика, `web/auth.py` — пароль и
+signed-cookie сессия, `web/routes.py` — маршруты). Все мутации — обычные form-POST
+с redirect и flash, поэтому UI работает и без HTMX. Запуск: `tgdigest web`
+(uvicorn), отдельный сервис `web` в compose; миграции выполняет одноразовый сервис
+`migrate`, поэтому app/web их не дублируют.
 
 ## Система промптов (`summarization/prompts.py`)
 

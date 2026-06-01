@@ -11,10 +11,13 @@ until pg_isready -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" >/dev/null 2>&1; do
     sleep 1
 done
 
-echo "entrypoint: applying migrations"
-alembic upgrade head
-
-echo "entrypoint: seeding default prompts (idempotent)"
-tgdigest seed-prompts || echo "entrypoint: seed-prompts skipped"
+# Migrations run in a single place (the `migrate` service). Other services set
+# RUN_MIGRATIONS=0 to avoid races.
+if [ "${RUN_MIGRATIONS:-1}" = "1" ]; then
+    echo "entrypoint: applying migrations"
+    alembic upgrade head
+    echo "entrypoint: seeding default prompts (idempotent)"
+    tgdigest seed-prompts || echo "entrypoint: seed-prompts skipped"
+fi
 
 exec "$@"

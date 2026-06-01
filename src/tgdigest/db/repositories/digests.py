@@ -105,3 +105,14 @@ class DigestRepository(BaseRepository):
             .limit(limit)
         )
         return list((await self.session.execute(stmt)).scalars().all())
+
+    async def recent_runs_all(self, limit: int = 50) -> list[DigestRun]:
+        stmt = select(DigestRun).order_by(DigestRun.id.desc()).limit(limit)
+        return list((await self.session.execute(stmt)).scalars().all())
+
+    async def recent_digests(self, limit: int = 50) -> list[Digest]:
+        stmt = select(Digest).order_by(Digest.id.desc()).limit(limit)
+        return list((await self.session.execute(stmt)).scalars().all())
+
+    async def get_digest(self, digest_id: int) -> Digest | None:
+        return await self.session.get(Digest, digest_id)

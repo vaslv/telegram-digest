@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Ошибки обработки</h1>
+{% if not errors %}<p>Ошибок нет 🎉</p>{% endif %}
+{% if errors %}
+<table>
+  <thead><tr><th>#</th><th>Стадия</th><th>Тип</th><th>Сообщение</th><th>Чат</th><th>Когда</th></tr></thead>
+  <tbody>
+  {% for e in errors %}
+    <tr><td>{{ e.id }}</td><td>{{ e.stage.value }}</td><td>{{ e.error_type }}</td>
+        <td>{{ e.message[:160] }}</td><td class="mono">{{ e.chat_id or "—" }}</td>
+        <td>{{ e.created_at.strftime("%d.%m %H:%M") }}</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}

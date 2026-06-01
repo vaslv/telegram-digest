@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Запуски анализа</h1>
+{% if not runs %}<p>Запусков пока не было.</p>{% endif %}
+{% if runs %}
+<table>
+  <thead><tr><th>#</th><th>Чат</th><th>Триггер</th><th>Статус</th><th>Сообщ.</th><th>Блоков</th><th>Важных</th><th>Токены</th><th>Когда</th></tr></thead>
+  <tbody>
+  {% for r in runs %}
+    <tr><td>{{ r.id }}</td><td class="mono">{{ r.chat_id }}</td><td>{{ r.trigger.value }}</td>
+        <td>{{ r.status.value }}</td><td>{{ r.raw_message_count }}</td><td>{{ r.preprocessed_block_count }}</td>
+        <td>{{ r.important_count }}</td><td>{{ (r.tokens_prompt or 0) + (r.tokens_completion or 0) }}</td>
+        <td>{{ r.created_at.strftime("%d.%m %H:%M") }}</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}

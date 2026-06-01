@@ -20,14 +20,22 @@ from datetime import UTC
 from apscheduler.jobstores.base import JobLookupError
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
+from telethon import TelegramClient
 
 from tgdigest.db.base import Database
 from tgdigest.db.enums import RunTrigger
 from tgdigest.db.models import Chat
-from tgdigest.db.repositories import ChatRepository, DigestRepository, MessageRepository
+from tgdigest.db.repositories import (
+    ChatRepository,
+    DialogRepository,
+    DigestRepository,
+    DigestRequestRepository,
+    MessageRepository,
+)
 from tgdigest.logging import get_logger
 from tgdigest.scheduling.triggers import evaluate_count_trigger, evaluate_time_trigger
 from tgdigest.summarization.service import DigestService
+from tgdigest.telegram.dialogs import list_dialogs
 from tgdigest.telegram.ingest import MessageIngestor
 
 _log = get_logger("scheduling")
@@ -41,10 +49,16 @@ class DigestScheduler:
         service: DigestService,
         *,
         ingestor: MessageIngestor | None = None,
+        client: TelegramClient | None = None,
+        dialog_refresh_minutes: int = 10,
+        request_poll_seconds: int = 8,
     ) -> None:
         self._db = db
         self._service = service
         self._ingestor = ingestor
+        self._client = client
+        self._dialog_refresh_minutes = dialog_refresh_minutes
+        self._request_poll_seconds = request_poll_seconds
         self._scheduler = AsyncIOScheduler(timezone=UTC)
         self._locks: dict[int, asyncio.Lock] = {}
         self._job_intervals: dict[int, int] = {}
@@ -52,16 +66,36 @@ class DigestScheduler:
 
     async def start(self) -> None:
         async with self._db.session() as session:
-            reaped = await DigestRepository(session).reap_stale_runs()
-        if reaped:
-            _log.warning("stale_runs_reaped", count=reaped)
+            reaped_runs = await DigestRepository(session).reap_stale_runs()
+            reaped_requests = await DigestRequestRepository(session).reap_running()
+        if reaped_runs or reaped_requests:
+            _log.warning("stale_reaped", runs=reaped_runs, requests=reaped_requests)
 
         self._scheduler.start()
+        if self._client is not None:
+            await self._refresh_dialogs()  # warm the cache + Telethon entity cache first
         await self.reconcile()
         self._scheduler.add_job(
             self.reconcile,
             IntervalTrigger(seconds=_RECONCILE_SECONDS),
             id="reconcile",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+        )
+        if self._client is not None:
+            self._scheduler.add_job(
+                self._refresh_dialogs,
+                IntervalTrigger(minutes=self._dialog_refresh_minutes),
+                id="dialogs",
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+            )
+        self._scheduler.add_job(
+            self._poll_requests,
+            IntervalTrigger(seconds=self._request_poll_seconds),
+            id="requests",
             replace_existing=True,
             max_instances=1,
             coalesce=True,
@@ -82,6 +116,7 @@ class DigestScheduler:
             chats = await ChatRepository(session).get_enabled()
         if self._ingestor is not None:
             self._ingestor.update_watched(chats)
+        await self._backfill_titles(chats)
 
         desired = {c.id: c.summary_interval_minutes for c in chats}
         for chat_id in list(self._job_intervals):
@@ -137,6 +172,66 @@ class DigestScheduler:
         async with self._lock(chat_id):
             _log.info("count_trigger_fired", chat_id=chat_id)
             await self._service.run(chat_id, trigger=RunTrigger.count)
+
+    # ── dialog cache + request queue (delegation for web/CLI) ────────────────
+    async def _refresh_dialogs(self) -> None:
+        if self._client is None:
+            return
+        try:
+            dialogs = await list_dialogs(self._client)
+        except Exception as exc:  # never let a refresh kill the loop
+            _log.warning("dialog_refresh_failed", error=str(exc))
+            return
+        rows = [
+            {
+                "telegram_chat_id": d.telegram_chat_id,
+                "title": d.title,
+                "chat_type": d.chat_type,
+                "username": d.username,
+                "is_member": True,
+            }
+            for d in dialogs
+        ]
+        async with self._db.session() as session:
+            await DialogRepository(session).upsert_many(rows)
+        _log.info("dialogs_refreshed", count=len(rows))
+
+    async def _poll_requests(self) -> None:
+        async with self._db.session() as session:
+            claimed = await DigestRequestRepository(session).claim_pending(limit=5)
+            items = [(r.id, r.chat_id, r.dry_run) for r in claimed]
+        for request_id, chat_id, dry_run in items:
+            try:
+                outcome = await self._service.run(
+                    chat_id, trigger=RunTrigger.manual, dry_run=dry_run, send=not dry_run
+                )
+                async with self._db.session() as session:
+                    await DigestRequestRepository(session).mark_done(
+                        request_id, digest_run_id=outcome.run_id
+                    )
+                _log.info("request_done", request_id=request_id, status=outcome.status)
+            except Exception as exc:  # record and move on
+                _log.warning("request_failed", request_id=request_id, error=str(exc))
+                async with self._db.session() as session:
+                    await DigestRequestRepository(session).mark_failed(request_id, error=str(exc))
+
+    async def _backfill_titles(self, chats: list[Chat]) -> None:
+        placeholders = [c for c in chats if c.title == str(c.telegram_chat_id)]
+        if not placeholders:
+            return
+        async with self._db.session() as session:
+            dialog_repo = DialogRepository(session)
+            chat_repo = ChatRepository(session)
+            for chat in placeholders:
+                dialog = await dialog_repo.get(chat.telegram_chat_id)
+                if dialog is not None:
+                    await chat_repo.set_identity(
+                        chat.id,
+                        title=dialog.title,
+                        chat_type=dialog.chat_type,
+                        username=dialog.username,
+                    )
+                    _log.info("chat_title_backfilled", chat_id=chat.id)
 
     async def _evaluate(self, chat_id: int, *, count_trigger: bool) -> tuple[Chat, bool] | None:
         async with self._db.session() as session:

@@ -20,6 +20,10 @@ from tgdigest.db.enums import ChatType
 from tgdigest.db.models import Chat
 
 TEST_DATABASE_URL = os.environ.get("TEST_DATABASE_URL")
+# Container-based components (web app, CLI) read DATABASE_URL; point them at the
+# same database the integration fixtures truncate.
+if TEST_DATABASE_URL:
+    os.environ["DATABASE_URL"] = TEST_DATABASE_URL
 
 _TABLES = (
     "chats",
@@ -30,6 +34,8 @@ _TABLES = (
     "importance_events",
     "prompts",
     "processing_errors",
+    "dialogs",
+    "digest_requests",
 )
 
 

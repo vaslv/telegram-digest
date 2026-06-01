@@ -38,6 +38,7 @@ from tgdigest.db.enums import (
     ImportanceType,
     MediaType,
     PromptScope,
+    RequestStatus,
     RunStatus,
     RunTrigger,
 )
@@ -52,6 +53,11 @@ def _enum(enum_cls: type, name: str) -> SAEnum:
     )
 
 
+# Shared instance — chat_type is used by both Chat and Dialog; reusing the same
+# Enum object ensures the PostgreSQL type is created exactly once.
+_CHAT_TYPE = _enum(ChatType, "chat_type")
+
+
 class TimestampMixin:
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
@@ -64,7 +70,7 @@ class Chat(TimestampMixin, Base):
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     telegram_chat_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
     title: Mapped[str] = mapped_column(Text)
-    chat_type: Mapped[ChatType] = mapped_column(_enum(ChatType, "chat_type"))
+    chat_type: Mapped[ChatType] = mapped_column(_CHAT_TYPE)
     username: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     enabled: Mapped[bool] = mapped_column(Boolean, server_default=sa_text("true"))
@@ -236,3 +242,43 @@ class ProcessingError(TimestampMixin, Base):
     message: Mapped[str] = mapped_column(Text)
     traceback: Mapped[str | None] = mapped_column(Text, nullable=True)
     context: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+
+
+class Dialog(Base):
+    """Cache of available Telegram dialogs, refreshed by the daemon.
+
+    Lets the web UI and CLI offer a chat picker and resolve titles/types without
+    opening a second Telethon client (the daemon owns the only session).
+    """
+
+    __tablename__ = "dialogs"
+
+    telegram_chat_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    title: Mapped[str] = mapped_column(Text)
+    chat_type: Mapped[ChatType] = mapped_column(_CHAT_TYPE)
+    username: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_member: Mapped[bool] = mapped_column(Boolean, server_default=sa_text("true"))
+    refreshed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class DigestRequest(TimestampMixin, Base):
+    """On-demand digest queue: web/CLI enqueue, the daemon executes."""
+
+    __tablename__ = "digest_requests"
+    __table_args__ = (Index("ix_digest_requests_status", "status"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    chat_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("chats.id", ondelete="CASCADE"), index=True
+    )
+    dry_run: Mapped[bool] = mapped_column(Boolean, server_default=sa_text("false"))
+    status: Mapped[RequestStatus] = mapped_column(
+        _enum(RequestStatus, "request_status"), server_default=sa_text("'pending'")
+    )
+    digest_run_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("digest_runs.id", ondelete="SET NULL"), nullable=True
+    )
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block content %}
+<a href="/digests">← к дайджестам</a>
+<h1>{{ digest.title }}</h1>
+<div class="mono">
+  {% if digest.period_start %}{{ digest.period_start.strftime("%d.%m.%Y %H:%M") }} – {{ digest.period_end.strftime("%H:%M") }} · {% endif %}
+  {{ "пусто" if digest.is_empty else "содержательный" }} · {{ "отправлен" if digest.sent else "не отправлен" }}
+</div>
+<pre class="digest">{{ digest.body_markdown or digest.summary or "—" }}</pre>
+{% endblock %}
