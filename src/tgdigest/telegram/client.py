@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import getpass
+
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 
@@ -61,7 +63,8 @@ class TelegramClientManager:
         """Interactive authorization (phone code, optional 2FA)."""
         await self._client.start(
             phone=self._settings.phone or (lambda: input("Phone (international format): ")),
-            password=self._settings.two_fa_password or None,
+            password=self._settings.two_fa_password
+            or (lambda: getpass.getpass("2FA password (cloud password): ")),
         )
         me = await self._client.get_me()
         _log.info("telegram_login_ok", user_id=getattr(me, "id", None))
